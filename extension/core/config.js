@@ -9,7 +9,8 @@
   if (!G || G.isLoaded('config')) return;
 
   /** 默认 API 基础地址（本地 GeekOzon 后端） */
-  const DEFAULT_API_BASE = 'http://localhost:5000';
+  //const DEFAULT_API_BASE = 'http://localhost:5000';
+  const DEFAULT_API_BASE = 'http://ozon.wangyaojun.cn';
 
   /** chrome.storage.local 的设置键名 */
   const SETTINGS_KEY = 'geekOzonSettings';
