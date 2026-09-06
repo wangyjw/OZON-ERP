@@ -117,6 +117,7 @@ function renderHomePage() {
               <button onclick="Router.navigate('/publish')"><i data-lucide="upload"></i><span>上架记录</span></button>
               <button onclick="Router.navigate('/online-products')"><i data-lucide="boxes"></i><span>在线商品</span></button>
               <button onclick="Router.navigate('/store-manage')"><i data-lucide="store"></i><span>店铺管理</span></button>
+              <button onclick="_downloadExtension()"><i data-lucide="puzzle"></i><span>插件下载</span></button>
             </div>
           </section>
 
@@ -159,6 +160,42 @@ async function _loadWorkbenchNotices() {
   } catch (error) {
     console.warn('[工作台] 公告加载失败:', error);
   }
+}
+
+/**
+ * 下载浏览器扩展插件包并弹出安装引导
+ */
+function _downloadExtension() {
+  // 直接触发 zip 下载（响应带 Content-Disposition: attachment，同源/跨域均会走浏览器下载）
+  const link = document.createElement('a');
+  link.href = `${Api.BASE_URL}/api/extension/download`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  // 弹出安装引导（版本号异步获取后回填）
+  Modal.show({
+    title: '插件下载与安装',
+    size: 'md',
+    body: `
+      <div style="font-size:13px;color:#475467;line-height:1.8;">
+        <p style="margin:0 0 10px;">插件包已开始下载<strong id="extVersionTag"></strong>，按以下步骤安装到 Chrome：</p>
+        <ol style="margin:0;padding-left:20px;">
+          <li>解压下载的 zip 压缩包</li>
+          <li>地址栏打开 <code style="background:#f2f4f7;padding:1px 6px;border-radius:4px;">chrome://extensions</code></li>
+          <li>开启右上角「开发者模式」</li>
+          <li>点击「加载已解压的扩展程序」，选择解压出的 <code style="background:#f2f4f7;padding:1px 6px;border-radius:4px;">geekozon-extension</code> 文件夹</li>
+        </ol>
+      </div>`,
+    footer: [{ text: '知道了', class: 'btn-primary' }],
+  });
+
+  Api.getExtensionVersion().then(res => {
+    if (res.code === 200 && res.data?.version) {
+      const tag = document.getElementById('extVersionTag');
+      if (tag) tag.textContent = `（v${res.data.version}）`;
+    }
+  }).catch(error => console.warn('[工作台] 扩展版本获取失败:', error));
 }
 
 function _renderMetrics(metrics) {

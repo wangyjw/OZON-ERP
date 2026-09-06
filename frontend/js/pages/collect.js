@@ -104,9 +104,14 @@ function renderCollectPage(route) {
           <h2 class="collect-page-title">商品采集</h2>
           <p class="collect-page-desc">从 Ozon 等平台快速采集商品数据</p>
         </div>
-        <button class="btn btn-primary btn-sm" onclick="showAddProductDialog()">
-          <i data-lucide="plus" style="width:14px;height:14px;"></i> 手动添加
-        </button>
+        <div style="display:flex;gap:8px;">
+          <button class="btn btn-ghost btn-sm" onclick="_downloadExtension()">
+            <i data-lucide="puzzle" style="width:14px;height:14px;"></i> 下载插件
+          </button>
+          <button class="btn btn-primary btn-sm" onclick="showAddProductDialog()">
+            <i data-lucide="plus" style="width:14px;height:14px;"></i> 手动添加
+          </button>
+        </div>
       </div>
 
       <!-- Tab 筛选栏 -->

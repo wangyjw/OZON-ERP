@@ -118,6 +118,65 @@ def create_app(config_class=Config):
             return error_response(f"扩展文件不存在: {filename}", 404)
         return send_file(file_path)
 
+    @app.route('/api/extension/version', methods=['GET'])
+    def extension_version():
+        """返回浏览器扩展版本信息（供前端展示版本号）"""
+        from flask import jsonify
+        manifest_path = os.path.join(EXTENSION_DIR, 'manifest.json')
+        try:
+            with open(manifest_path, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
+            return jsonify({
+                "code": 200,
+                "msg": "ok",
+                "data": {"version": manifest.get('version', ''), "name": manifest.get('name', '')}
+            })
+        except FileNotFoundError:
+            return error_response("manifest.json 不存在", 404)
+        except Exception as e:
+            return error_response(f"读取扩展版本失败: {str(e)}", 500)
+
+    @app.route('/api/extension/download', methods=['GET'])
+    def extension_download():
+        """将 extension/ 目录内存打包为 zip 供浏览器下载（前端首页「插件下载」入口）"""
+        import io
+        import zipfile
+        if not os.path.isdir(EXTENSION_DIR):
+            return error_response("扩展目录不存在", 404)
+
+        # 打包时排除的系统/开发垃圾文件
+        _excluded_files = {'.DS_Store', 'Thumbs.db', 'desktop.ini'}
+        _excluded_dirs = {'__pycache__', 'node_modules', '.git'}
+
+        # 读取版本号用于命名（读取失败时使用默认文件名）
+        version = ''
+        try:
+            with open(os.path.join(EXTENSION_DIR, 'manifest.json'), 'r', encoding='utf-8') as f:
+                version = json.load(f).get('version', '')
+        except Exception:
+            pass
+        zip_name = f"geekozon-extension-v{version}.zip" if version else 'geekozon-extension.zip'
+
+        try:
+            buf = io.BytesIO()
+            with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, dirs, files in os.walk(EXTENSION_DIR):
+                    dirs[:] = [d for d in dirs if d not in _excluded_dirs]
+                    for filename in files:
+                        if filename in _excluded_files:
+                            continue
+                        file_path = os.path.join(root, filename)
+                        # zip 内含顶层目录 geekozon-extension/，解压即得完整扩展文件夹（统一用 / 分隔符）
+                        arcname = 'geekozon-extension/' + os.path.relpath(file_path, EXTENSION_DIR).replace(os.sep, '/')
+                        zf.write(file_path, arcname)
+        except Exception as e:
+            return error_response(f"扩展打包失败: {str(e)}", 500)
+
+        buf.seek(0)
+        response = send_file(buf, mimetype='application/zip', as_attachment=True, download_name=zip_name)
+        response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+        return response
+
     # ===== 首页路由：重定向到前端页面 =====
 
     @app.route('/')

@@ -746,9 +746,15 @@ const Api = (() => {
     });
   }
 
+  /** 获取浏览器扩展版本信息 */
+  function getExtensionVersion() {
+    return request('/api/extension/version');
+  }
+
   // 公开接口
   return {
     BASE_URL,
+    getExtensionVersion,
     getProducts,
     uploadImage,
     transferImages,
