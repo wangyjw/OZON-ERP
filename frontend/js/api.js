@@ -5,7 +5,7 @@
 const Api = (() => {
   // 后端 API 基础地址（开发环境）
   //const BASE_URL = 'http://localhost:5000';
-  const BASE_URL = 'http://ozon.wangyaojun.cn';
+  const BASE_URL = 'https://ozon.wangyaojun.cn';
 
   // 请求超时时间（毫秒）
   const TIMEOUT = 15000;
