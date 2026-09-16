@@ -73,6 +73,7 @@ function renderStorePage(route) {
               <th>通知推送</th>
               <th>授权类型</th>
               <th>授权时间</th>
+              <th>最后校验</th>
               <th>授权状态</th>
               <th>操作</th>
             </tr>
@@ -169,11 +170,12 @@ function renderStoreTable() {
       <td>${s.notifyOn ? '<span class="notify-badge on"><i data-lucide="bell-ring" style="width:12px;height:12px;"></i> 已开启</span>' : '<span class="notify-badge off">未开启</span>'}</td>
       <td><span class="auth-type-tag ${s.authType === 'API授权' ? 'api' : 'cookie'}">${s.authType}</span></td>
       <td class="time-cell">${s.authTime || ''}</td>
-      <td>${getStoreStatusBadge(s.authStatus)}</td>
+      <td class="time-cell">${s.verifyTime || '-'}</td>
+      <td>${getStoreStatusBadge(s.authStatus, s.lastAuthError)}</td>
       <td>
         <div class="action-btns">
           <button class="action-link" onclick="showEditStoreDialog(${s.id})">编辑</button>
-          <button class="action-link" onclick="refreshAuth(${s.id})">更新授权</button>
+          <button class="action-link ${s.authStatus === 'expired' ? 'danger' : ''}" onclick="refreshAuth(${s.id})">${s.authStatus === 'expired' ? '重新授权' : '更新授权'}</button>
           <button class="action-link danger" onclick="deleteStore(${s.id})">删除</button>
         </div>
       </td>
@@ -187,16 +189,27 @@ function renderStoreTable() {
   if (window.lucide) lucide.createIcons();
 }
 
-/** 店铺状态徽章 */
-function getStoreStatusBadge(status) {
+/** 店铺状态徽章（expired 附带失败原因提示） */
+function getStoreStatusBadge(status, lastAuthError) {
   const map = {
     active: { text: '已授权', cls: 'status-active' },
-    expired: { text: '已过期', cls: 'status-expired' },
+    expired: { text: '凭证失效', cls: 'status-expired' },
     pending: { text: '待授权', cls: 'status-pending' },
     disabled: { text: '已禁用', cls: 'status-disabled' },
   };
   const item = map[status] || { text: status, cls: '' };
-  return `<span class="store-status-badge ${item.cls}">${item.text}</span>`;
+  // 凭证失效时把后端记录的错误原因挂到 title，鼠标悬停可见
+  const tip = (status === 'expired' && lastAuthError)
+    ? ` title="${escapeHtml(lastAuthError)}"`
+    : '';
+  return `<span class="store-status-badge ${item.cls}"${tip}>${item.text}</span>`;
+}
+
+/** 简单 HTML 转义（用于 title/插值文本） */
+function escapeHtml(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // ===== 筛选 & 搜索 =====
@@ -682,11 +695,25 @@ async function submitAddStoreForm() {
   }
 
   if (res.code === 200) {
+    const verify = res.data && res.data.verify;
+    // M1 绑店闭环：后端已真实校验 Ozon 凭证
+    if (verify && !verify.valid) {
+      // 凭证校验失败：店铺已保存为「凭证失效」，保留弹窗便于用户直接修正凭证
+      showFieldError('apiKey', verify.message || 'Ozon 凭证校验未通过');
+      await loadStoresFromAPI();
+      await loadGroupsFromAPI();
+      renderStoreTable();
+      Toast.show(res.msg || '店铺已保存，但凭证校验未通过', 'warning');
+      return;
+    }
     Modal.close();
     await loadStoresFromAPI();
     await loadGroupsFromAPI();
     renderStoreTable();
-    Toast.show(`店铺「${storeData.alias}」添加并授权成功！`, 'success');
+    const okMsg = (verify && verify.storeId)
+      ? `店铺「${storeData.alias}」添加成功，凭证校验通过（Ozon 店铺ID: ${verify.storeId}）`
+      : `店铺「${storeData.alias}」添加并授权成功！`;
+    Toast.show(res.msg || okMsg, 'success');
   } else {
     Toast.show(res.msg || '添加失败', 'error');
   }

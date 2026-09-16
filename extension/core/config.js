@@ -9,8 +9,8 @@
   if (!G || G.isLoaded('config')) return;
 
   /** 默认 API 基础地址（远程 GeekOzon 后端，必须用 https，否则 HTTPS 页面上会被浏览器当作混合内容拦截） */
-  //const DEFAULT_API_BASE = 'http://localhost:5000';
-  const DEFAULT_API_BASE = 'https://ozon.wangyaojun.cn';
+  const DEFAULT_API_BASE = 'http://localhost:5000';
+  //const DEFAULT_API_BASE = 'https://ozon.wangyaojun.cn';
 
   /** chrome.storage.local 的设置键名 */
   const SETTINGS_KEY = 'geekOzonSettings';

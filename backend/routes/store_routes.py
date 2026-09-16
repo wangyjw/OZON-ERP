@@ -5,10 +5,101 @@
 from flask import Blueprint, request
 from models.account import Store
 from db import get_connection
+from services.ozon_api import get_store_info, OzonAPIError
 from utils.response import success_response, error_response, paginate_response, handle_errors
 from utils.validators import extract_pagination
 
 store_bp = Blueprint('store', __name__)
+
+
+def _verify_credentials(client_id, api_key):
+    """调用 Ozon 真实校验凭证，返回统一的校验结果 dict
+
+    返回:
+        {
+            'valid': True/False,
+            'store_id': str|None,
+            'store_name': str|None,
+            'status': str|None,
+            'probe': str|None,
+            'error_code': int|None,   # OzonAPIError.status_code（401/403/超时等）
+            'message': str,           # 面向用户的中文说明
+        }
+    """
+    try:
+        info = get_store_info(client_id=client_id, api_key=api_key)
+        return {
+            'valid': True,
+            'store_id': info.get('store_id'),
+            'store_name': info.get('name'),
+            'status': info.get('status'),
+            'probe': info.get('probe'),
+            'error_code': None,
+            'message': '凭证校验通过',
+        }
+    except OzonAPIError as e:
+        code = e.status_code
+        if code == 401:
+            msg = 'Ozon 认证失败（401），请检查 Client-Id / Api-Key 是否正确'
+        elif code == 403:
+            msg = 'Ozon 权限不足（403），请确认 Api-Key 拥有 Seller API 权限'
+        elif not code:
+            msg = f'无法连接 Ozon API：{e.message}'
+        else:
+            msg = f'Ozon 校验失败（HTTP {code}）：{e.message}'
+        return {
+            'valid': False,
+            'store_id': None,
+            'store_name': None,
+            'status': None,
+            'probe': None,
+            'error_code': code,
+            'message': msg,
+        }
+    except Exception as e:
+        return {
+            'valid': False,
+            'store_id': None,
+            'store_name': None,
+            'status': None,
+            'probe': None,
+            'error_code': None,
+            'message': f'校验异常：{str(e)}',
+        }
+
+
+def _apply_verify_result(store_pk, verify, user_store_id=None):
+    """把校验结果写回 stores 表，返回更新后的记录
+
+    - 成功：auth_status='active'、auth_time/verify_time=now、清空 last_auth_error，
+            若 Ozon 返回了真实 store_id 且与用户填写的不一致，以 Ozon 为准回填并提示。
+    - 失败：auth_status='expired'、verify_time=now、last_auth_error=错误详情。
+    """
+    from datetime import datetime
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    if verify.get('valid'):
+        upd = {
+            'auth_status': 'active',
+            'auth_time': now,
+            'verify_time': now,
+            'last_auth_error': None,
+        }
+        ozon_sid = verify.get('store_id')
+        # Ozon 返回真实店铺 ID 且与用户填写不一致时，以 Ozon 为准（前提：该 ID 未被其他店铺占用）
+        if ozon_sid and user_store_id and str(ozon_sid) != str(user_store_id):
+            if not Store.find_by_store_id(ozon_sid):
+                upd['store_id'] = str(ozon_sid)
+                verify['store_id_updated'] = True
+        Store.update(store_pk, **upd)
+    else:
+        Store.update(
+            store_pk,
+            auth_status='expired',
+            verify_time=now,
+            last_auth_error=verify.get('message'),
+        )
+    return Store.find_by_id(store_pk)
 
 
 def _mask_store_for_response(store):
@@ -56,6 +147,8 @@ def get_stores():
         s['authType'] = 'API授权' if s.pop('auth_type', 'api') == 'api' else 'Cookie授权'
         s['authStatus'] = s.pop('auth_status', 'pending')
         s['authTime'] = s.pop('auth_time', '')
+        s['verifyTime'] = s.pop('verify_time', '')
+        s['lastAuthError'] = s.pop('last_auth_error', '')
         s['todayLimit'] = s.pop('today_limit', 0)
         s['accountId'] = s.pop('account_id', None)
         _mask_store_for_response(s)
@@ -107,7 +200,29 @@ def create_store():
         account_id=int(account_id) if account_id else None,
     )
 
-    return success_response(data=_mask_store_for_response(store), msg="店铺添加成功")
+    # M1 绑店闭环：保存后立即向 Ozon 真实校验凭证
+    # - 校验通过 → active + auth_time/verify_time，并按 Ozon 回填真实 store_id
+    # - 校验失败 → 店铺仍保存但置 expired + last_auth_error，响应 200 + verify 结果，
+    #            前端据 verify.valid 决定提示语（不落库阻断，用户可先保存后修正）
+    verify = None
+    if client_id and api_key and store.get('auth_type') == 'api':
+        verify = _verify_credentials(client_id, api_key)
+        store = _apply_verify_result(store['id'], verify, user_store_id=store_id)
+
+    resp_data = _mask_store_for_response(store)
+    if verify:
+        resp_data['verify'] = verify
+        if verify.get('valid'):
+            msg = '店铺添加成功，Ozon 凭证校验通过'
+            if verify.get('store_id_updated'):
+                msg += f'（店铺ID已按 Ozon 回填为 {verify["store_id"]}）'
+            return success_response(data=resp_data, msg=msg)
+        return success_response(
+            data=resp_data,
+            msg=f'店铺已保存，但凭证校验未通过：{verify.get("message")}',
+        )
+
+    return success_response(data=resp_data, msg="店铺添加成功")
 
 
 @store_bp.route('/stores/<int:store_pk>', methods=['PUT'])
@@ -219,16 +334,104 @@ def batch_delete_stores():
 @store_bp.route('/stores/<int:store_pk>/refresh-auth', methods=['POST'])
 @handle_errors
 def refresh_auth(store_pk):
-    """更新店铺授权（刷新授权时间）"""
-    from datetime import datetime
+    """更新店铺授权（M1：改为真实校验，不再仅本地置 active）
 
+    调用 Ozon 店铺信息接口验证凭证：
+    - 成功 → auth_status='active' + auth_time/verify_time=now + 清空 last_auth_error
+    - 失败 → auth_status='expired' + verify_time=now + 写入 last_auth_error
+    """
     existing = Store.find_by_id(store_pk)
     if not existing:
         return error_response("店铺不存在", 404)
 
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    Store.update(store_pk, auth_time=now, auth_status='active')
-    return success_response(msg="授权更新成功")
+    # Cookie 授权店铺没有 API 凭证，无法走 API 校验
+    if existing.get('auth_type') == 'cookie':
+        return error_response(
+            '该店铺为 Cookie 授权，不支持 API 凭证校验；请通过扩展重新提取 Cookie',
+            400,
+        )
+
+    from utils.security import decrypt_secret
+    client_id = existing.get('client_id') or existing.get('store_id')
+    api_key = decrypt_secret(existing.get('api_key'))
+
+    if not client_id or not api_key:
+        return error_response('该店铺未配置 Client-Id / Api-Key，无法校验，请先编辑补充凭证', 400)
+
+    verify = _verify_credentials(client_id, api_key)
+    store = _apply_verify_result(store_pk, verify, user_store_id=existing.get('store_id'))
+
+    if verify.get('valid'):
+        return success_response(
+            data=_mask_store_for_response(store),
+            msg='授权校验通过，店铺凭证有效',
+        )
+    return error_response(
+        f'授权校验未通过：{verify.get("message")}',
+        data={'verify': verify, 'store': _mask_store_for_response(store)},
+    )
+
+
+@store_bp.route('/stores/verify', methods=['POST'])
+@handle_errors
+def verify_store():
+    """统一凭证校验入口（M1）
+
+    两种用法：
+      1) { "storePk": 123 }            —— 校验已存店铺（读库内凭证，调用 Ozon，写回结果）
+      2) { "clientId": "...", "apiKey": "..." }  —— 添加店铺前的预检（不落库）
+
+    返回: { valid, storeId, storeName, errorCode, message, store? }
+    """
+    data = request.get_json() or {}
+
+    store_pk = data.get('storePk') or data.get('store_pk')
+    client_id = (data.get('clientId') or '').strip()
+    api_key = (data.get('apiKey') or '').strip()
+
+    if store_pk:
+        existing = Store.find_by_id(int(store_pk))
+        if not existing:
+            return error_response("店铺不存在", 404)
+        if existing.get('auth_type') == 'cookie':
+            return error_response(
+                '该店铺为 Cookie 授权，不支持 API 凭证校验',
+                400,
+            )
+        from utils.security import decrypt_secret
+        cid = existing.get('client_id') or existing.get('store_id')
+        key = decrypt_secret(existing.get('api_key'))
+        if not cid or not key:
+            return error_response('该店铺未配置 Client-Id / Api-Key，无法校验', 400)
+        verify = _verify_credentials(cid, key)
+        store = _apply_verify_result(int(store_pk), verify, user_store_id=existing.get('store_id'))
+        payload = {
+            'valid': verify.get('valid'),
+            'storeId': verify.get('store_id') or existing.get('store_id'),
+            'storeName': verify.get('store_name'),
+            'errorCode': verify.get('error_code'),
+            'message': verify.get('message'),
+            'store': _mask_store_for_response(store),
+        }
+        if verify.get('valid'):
+            return success_response(data=payload, msg='凭证校验通过')
+        return error_response(payload['message'], data=payload)
+
+    # 裸凭证预检（不落库）
+    if not client_id or not api_key:
+        return error_response('请提供 clientId 和 apiKey，或指定 storePk 校验已存店铺', 400)
+
+    verify = _verify_credentials(client_id, api_key)
+    payload = {
+        'valid': verify.get('valid'),
+        'storeId': verify.get('store_id'),
+        'storeName': verify.get('store_name'),
+        'errorCode': verify.get('error_code'),
+        'message': verify.get('message'),
+    }
+    if verify.get('valid'):
+        return success_response(data=payload, msg='凭证校验通过')
+    return error_response(payload['message'], data=payload)
 
 
 @store_bp.route('/stores/groups', methods=['GET'])

@@ -182,7 +182,8 @@ class Store:
         """更新店铺信息"""
         allowed = {'alias', 'currency', 'store_group', 'notify_on',
                    'auth_type', 'client_id', 'api_key', 'auth_status',
-                   'auth_time', 'today_limit', 'account_id'}
+                   'auth_time', 'today_limit', 'account_id',
+                   'verify_time', 'last_auth_error', 'store_id'}
         fields = []
         params = []
         for k, v in kwargs.items():

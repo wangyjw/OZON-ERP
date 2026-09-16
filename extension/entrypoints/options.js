@@ -9,7 +9,7 @@
   const ApiClient = G.core.ApiClient;
 
   const DEFAULTS = {
-    apiBaseUrl: 'https://ozon.wangyaojun.cn',
+    apiBaseUrl: 'http://localhost:5000',
     blackPriceRatio: 0.95,
     exchangeRate: 12.5,
     profitMargin: 1.3,

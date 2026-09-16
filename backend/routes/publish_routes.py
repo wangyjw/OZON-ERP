@@ -5,6 +5,7 @@
 from flask import Blueprint, request
 from models.product import Product, PublishTask
 from services.publish_service import PublishService, build_ozon_product_item, _get_store_currency
+from services.publish_preflight_service import preflight
 from utils.response import success_response, error_response, handle_errors
 
 publish_bp = Blueprint('publish', __name__)
@@ -40,13 +41,17 @@ def submit_publish():
             invalid_ids.append(pid)
             continue
 
-        task = PublishService.create_task(
-            pid,
-            platform,
-            store_id=store_id,
-            publish_mode=publish_mode,
-            price_offset=price_offset,
-        )
+        try:
+            task = PublishService.create_task(
+                pid,
+                platform,
+                store_id=store_id,
+                publish_mode=publish_mode,
+                price_offset=price_offset,
+            )
+        except ValueError as e:
+            # 参数类错误（如未传 storeId）→ 400 而非 500
+            return error_response(str(e), 400)
         tasks.append(task)
 
     if not tasks:
@@ -88,6 +93,38 @@ def submit_publish():
         },
         msg=msg
     )
+
+
+@publish_bp.route('/publish/preflight', methods=['POST'])
+@handle_errors
+def publish_preflight():
+    """发布前置只读预检（M2）
+
+    请求体: { "productIds": [...], "storeId": "...", "publishMode"?: "merge|split" }
+    返回: {
+      storeReady: bool, storeError, storeCurrency,
+      items: [{ productId, ready, blockers: [...], warnings: [...] }]
+    }
+
+    不建任务、不调 Ozon 写接口。用于前端在「选店铺确认」后、
+    「提交发布」前一次性暴露所有可预防的失败。
+    """
+    data = request.get_json()
+    if not data:
+        return error_response("请求体不能为空")
+
+    product_ids = data.get('productIds') or []
+    if not product_ids:
+        return error_response("请选择要发布的商品")
+
+    store_id = data.get('storeId')
+    if not store_id:
+        return error_response("请选择要发布到的 Ozon 店铺")
+
+    publish_mode = data.get('publishMode') or data.get('publish_mode')
+
+    result = preflight(product_ids, store_id, publish_mode)
+    return success_response(data=result)
 
 
 @publish_bp.route('/publish/<task_id>/status', methods=['GET'])

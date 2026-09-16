@@ -83,13 +83,20 @@ def _call_ozon_api(endpoint, body, client_id=None, api_key=None):
     url = f'{OZON_API_BASE}{endpoint}'
     try:
         resp = requests.post(url, json=body, headers=headers, timeout=30)
-        data = resp.json()
+
+        # 先尝试解析 JSON；Ozon/WAF 可能返回 HTML 错误页，此时按状态码判错
+        try:
+            data = resp.json()
+        except ValueError:
+            # 非 JSON 响应（HTML 错误页 / 空体）：按 HTTP 状态码分类，不带原始 HTML 到错误信息
+            data = {}
+            if resp.status_code == 200:
+                raise OzonAPIError('Ozon 返回了非 JSON 响应（可能被网关/WAF 拦截）', 502)
 
         if resp.status_code != 200:
-            raise OzonAPIError(
-                f'Ozon API 错误: {data.get("message", resp.text)}',
-                resp.status_code
-            )
+            # body 可能是 dict 或 str，取 message 时做防御
+            msg = data.get('message', resp.text) if isinstance(data, dict) else resp.text
+            raise OzonAPIError(f'Ozon API 错误: {msg}', resp.status_code)
 
         return data
     except requests.exceptions.Timeout:
@@ -696,6 +703,69 @@ def list_products(status_filter=None, last_id='', limit=100, client_id=None, api
     else:
         body['filter'] = {'visibility': 'ALL'}
     return _call_ozon_api('/v3/product/list', body, client_id, api_key)
+
+
+def get_store_info(client_id=None, api_key=None):
+    """调用 Ozon 店铺信息接口验证凭证并获取店铺真实信息（M1 绑店闭环）
+
+    首选 POST /v1/seller/info（官方 SellerAPI_SellerInfo，返回 company/subscription 等）；
+    若该端点不可用（404/405 表示版本变动），降级用 POST /v3/product/list {"limit": 1}
+    ——任何已鉴权轻量接口返回 200 即证明凭证有效，401/403 即无效。
+
+    Args:
+        client_id: Ozon Client-Id（可空，空时自动取第一个 active 店铺）
+        api_key: Ozon API-Key（明文，调用前由 _get_store_credentials 解密）
+
+    Returns:
+        dict: {
+            'valid': True/False,           # 凭证是否通过 Ozon 验证
+            'store_id': str|None,          # Ozon 返回的真实店铺 ID（seller/info 无此字段，恒为 None）
+            'name': str|None,              # 公司/店铺名称（company.name / legal_name）
+            'status': str|None,            # Ozon 侧状态（seller/info 不返回，恒为 None）
+            'currency': str|None,          # 店铺后台币种（company.currency）
+            'probe': 'seller_info'|'product_list',  # 实际生效的探测端点
+        }
+        失败抛 OzonAPIError(带 status_code)：401/403=凭证无效，其他=网络/服务端错误
+    """
+    # 1) 首选端点：POST /v1/seller/info（官方文档 SellerAPI_SellerInfo）
+    try:
+        data = _call_ozon_api('/v1/seller/info', {}, client_id, api_key)
+        # 响应结构：{"company": {"name","legal_name","currency","country","inn",...},
+        #            "ratings":[...], "subscription":{...}}（无顶层 result 包裹）
+        company = data.get('company') or {}
+        name = company.get('name') or company.get('legal_name')
+        return {
+            'valid': True,
+            'store_id': None,                # seller/info 不返回店铺数字 ID
+            'name': name,
+            'status': None,
+            'currency': company.get('currency'),
+            'probe': 'seller_info',
+        }
+    except OzonAPIError as e:
+        # 401/403 是确定的"凭证无效"，不重试直接抛出
+        if e.status_code in (401, 403):
+            raise
+        # 404/405 表示端点不存在/方法不允许 → 走降级探测
+        if e.status_code not in (404, 405):
+            raise
+
+    # 2) 降级探测：/v3/product/list 仅需 list 权限，200 即代表凭证有效
+    data = _call_ozon_api('/v3/product/list', {
+        'filter': {'visibility': 'ALL'},
+        'limit': 1,
+        'last_id': '',
+    }, client_id, api_key)
+    result = (data.get('result') or {}) if isinstance(data, dict) else {}
+    return {
+        'valid': True,
+        'store_id': None,
+        'name': None,
+        'status': None,
+        'currency': None,
+        'probe': 'product_list',
+        'total': result.get('total'),
+    }
 
 
 def list_all_products(client_id=None, api_key=None, status_filter=None, page_size=500):

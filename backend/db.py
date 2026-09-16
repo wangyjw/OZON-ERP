@@ -68,6 +68,13 @@ def _run_migrations(conn):
         conn.execute(
             "ALTER TABLE stores ADD COLUMN seller_cookies TEXT"
         )
+    # 迁移3：stores 表添加 verify_time / last_auth_error 列（M1 绑店凭证真实校验闭环）
+    # verify_time：最后一次真实调用 Ozon 验证凭证的时间；
+    # last_auth_error：最近一次校验或发布时返回的凭证错误详情（401/403 等），供前端红标提示
+    if 'verify_time' not in stores_cols:
+        conn.execute("ALTER TABLE stores ADD COLUMN verify_time TEXT")
+    if 'last_auth_error' not in stores_cols:
+        conn.execute("ALTER TABLE stores ADD COLUMN last_auth_error TEXT")
     online_cols = {
         row['name'] for row in conn.execute("PRAGMA table_info(online_products)")
     }

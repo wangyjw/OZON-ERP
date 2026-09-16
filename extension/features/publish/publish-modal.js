@@ -1169,18 +1169,23 @@
       const resp = await ApiClient.fetchShops();
       const data = ApiClient.data(resp, null);
       this.shops = (data && data.list) || (Array.isArray(data) ? data : []);
-      // 默认店铺自动选择
+      // 默认店铺自动选择（仅可选已授权 active 的店铺，凭证失效的不自动勾选）
       if (!this.form.shopIds.length && this.shops.length) {
-        const def = this.shops.find(function (s) { return s.is_default === 1 || s.isDefault === 1; });
-        if (def) {
+        const usable = this.shops.filter(function (s) {
+          const auth = s.auth_status || s.authStatus || 'active';
+          return auth === 'active' || auth === 'ok';
+        });
+        if (usable.length) {
+          const def = usable.find(function (s) { return s.is_default === 1 || s.isDefault === 1; }) || usable[0];
           this.form.shopIds = [String(def.store_id || def.storeId || def.id)];
-        } else {
-          this.form.shopIds = [String(this.shops[0].store_id || this.shops[0].storeId || this.shops[0].id)];
         }
       }
-      // 校验记忆中的 shopIds 是否仍存在
-      const validIds = new Set(this.shops.map(function (s) { return String(s.store_id || s.storeId || s.id); }));
-      this.form.shopIds = this.form.shopIds.filter(function (id) { return validIds.has(String(id)); });
+      // 校验记忆中的 shopIds 是否仍存在且凭证有效（失效店铺自动剔除）
+      const usableIds = new Set(this.shops.filter(function (s) {
+        const auth = s.auth_status || s.authStatus || 'active';
+        return auth === 'active' || auth === 'ok';
+      }).map(function (s) { return String(s.store_id || s.storeId || s.id); }));
+      this.form.shopIds = this.form.shopIds.filter(function (id) { return usableIds.has(String(id)); });
       this._renderShopTrigger();
     }
 
@@ -1622,19 +1627,24 @@
       if (panel) panel.innerHTML = this._renderShopPanel();
     }
 
-    /** 渲染店铺下拉面板 */
+    /** 渲染店铺下拉面板（M1：凭证失效的店铺灰显不可选） */
     _renderShopPanel() {
       if (!this.shops.length) return '<div class="pm-loading">暂无可用店铺</div>';
       const self = this;
       return this.shops.map(function (s) {
         const sid = String(s.store_id || s.storeId || s.id);
-        const checked = self.form.shopIds.indexOf(sid) !== -1 ? 'checked' : '';
         const auth = s.auth_status || s.authStatus || 'unknown';
-        const authBadge = (auth === 'ok' || auth === 'active')
+        const usable = (auth === 'active' || auth === 'ok');
+        const checked = usable && self.form.shopIds.indexOf(sid) !== -1 ? 'checked' : '';
+        const authBadge = usable
           ? '<span class="pm-badge pm-badge-ok">已授权</span>'
-          : '<span class="pm-badge pm-badge-warn">' + utils.escapeHtml(auth) + '</span>';
-        return '<div class="pm-shop-item" data-store="' + utils.escapeHtml(sid) + '">' +
-          '<input type="checkbox" ' + checked + ' />' +
+          : '<span class="pm-badge pm-badge-warn">凭证失效</span>';
+        const disabledAttr = usable ? '' : ' disabled';
+        const itemCls = usable ? 'pm-shop-item' : 'pm-shop-item pm-shop-item-disabled';
+        const tip = usable ? '' : ' title="凭证失效，请到 ERP 店铺管理重新授权"';
+        return '<div class="' + itemCls + '" data-store="' + utils.escapeHtml(sid) + '"' + tip +
+               (usable ? '' : ' style="opacity:.55;cursor:not-allowed;"') + '>' +
+          '<input type="checkbox" ' + checked + disabledAttr + ' />' +
           '<div class="pm-shop-item-meta">' +
             '<div class="pm-shop-item-alias">' + utils.escapeHtml(s.alias || sid) + ' ' + authBadge + '</div>' +
             '<div class="pm-shop-item-meta-sub">' + utils.escapeHtml(s.store_group || s.storeGroup || '') + ' · ' + utils.escapeHtml(s.currency || 'RUB') + '</div>' +
@@ -1794,10 +1804,12 @@
       const panel = this.$('#pmShopPanel');
       if (!panel) return;
       panel.querySelectorAll('.pm-shop-item').forEach(function (item) {
+        const cb = item.querySelector('input[type="checkbox"]');
+        // 凭证失效的店铺：checkbox 已 disabled，且整块不可点
+        if (!cb || cb.disabled) return;
         item.addEventListener('click', function (e) {
           if (e.target.tagName === 'INPUT') return; // 让 checkbox 自己处理
           const sid = item.getAttribute('data-store');
-          const cb = item.querySelector('input[type="checkbox"]');
           if (cb) {
             cb.checked = !cb.checked;
             if (cb.checked) {
@@ -1810,19 +1822,16 @@
             if (txt) txt.innerHTML = self._renderShopTriggerText();
           }
         });
-        const cb = item.querySelector('input[type="checkbox"]');
-        if (cb) {
-          cb.addEventListener('change', function () {
-            const sid = item.getAttribute('data-store');
-            if (cb.checked) {
-              if (self.form.shopIds.indexOf(sid) === -1) self.form.shopIds.push(sid);
-            } else {
-              self.form.shopIds = self.form.shopIds.filter(function (id) { return id !== sid; });
-            }
-            const txt = self.$('#pmShopTriggerText');
-            if (txt) txt.innerHTML = self._renderShopTriggerText();
-          });
-        }
+        cb.addEventListener('change', function () {
+          const sid = item.getAttribute('data-store');
+          if (cb.checked) {
+            if (self.form.shopIds.indexOf(sid) === -1) self.form.shopIds.push(sid);
+          } else {
+            self.form.shopIds = self.form.shopIds.filter(function (id) { return id !== sid; });
+          }
+          const txt = self.$('#pmShopTriggerText');
+          if (txt) txt.innerHTML = self._renderShopTriggerText();
+        });
       });
     }
 
@@ -2379,7 +2388,53 @@
         const productId = collectResp.data && collectResp.data.id;
         if (!productId) throw new Error('未拿到 productId');
 
-        // 2) 对每个选中的店铺创建发布任务
+        // 2) M2: 发布前置只读预检 —— 逐店铺跑一遍，把可预防的失败拦在建任务之前
+        //    预检接口异常时不阻断流程（降级为直接发布，保持旧行为）
+        const publishMode = this.form.modelId ? 'merge' : 'split';
+        const blockedShops = {};
+        const preflightWarnings = [];
+        for (const sid of this.form.shopIds) {
+          try {
+            const pfResp = await ApiClient.publishPreflight({
+              productIds: [productId],
+              storeId: sid,
+              publishMode: publishMode,
+            });
+            if (!ApiClient.isOk(pfResp)) {
+              // 接口返回业务错误（如参数缺失）时按「未通过」处理更安全；
+              // 网络层失败 code=-1 同样落入这里 —— 为避免误拦，仅当拿到了结构化 data 时才拦截
+              const pfErrData = ApiClient.data(pfResp, null);
+              if (!pfErrData) continue;
+            }
+            const pf = ApiClient.data(pfResp, null);
+            if (!pf) continue;
+            const reasons = [];
+            if (pf.storeReady === false && pf.storeError) reasons.push(pf.storeError);
+            const item = (pf.items || []).find(function (i) { return i.productId === productId; }) || {};
+            (item.blockers || []).forEach(function (b) { reasons.push(b); });
+            if (reasons.length) {
+              blockedShops[sid] = reasons;
+            } else if (item.warnings && item.warnings.length) {
+              preflightWarnings.push(item.warnings[0]);
+            }
+          } catch (pfErr) {
+            console.warn('[GeekOzon] preflight 异常，跳过店铺 ' + sid + ' 的预检:', pfErr);
+          }
+        }
+        const blockedIds = Object.keys(blockedShops);
+        if (blockedIds.length) {
+          blockedIds.forEach(function (sid) {
+            console.warn('[GeekOzon] preflight 拦截店铺 ' + sid + ':', blockedShops[sid]);
+          });
+          const firstShop = blockedShops[blockedIds[0]];
+          this._toast('预检未通过（' + blockedIds.length + ' 个店铺）：' + firstShop[0], 'err');
+          return;
+        }
+        if (preflightWarnings.length) {
+          this._toast('预检警告：' + preflightWarnings[0], 'err');
+        }
+
+        // 3) 对每个选中的店铺创建发布任务
         // 后端 PublishService.create_task 异步执行：
         //   图片预处理 → build_ozon_product_item → 调用 Ozon /v3/product/import API
         // 浮动价格（对齐 maozi）：每个店铺在 [0, floatingPrice] 区间随机加价
@@ -2395,7 +2450,7 @@
             storeId: sid,
             productIds: [productId],
             platform: 'ozon',
-            publishMode: this.form.modelId ? 'merge' : 'split',
+            publishMode: publishMode,
             // 透传浮动额给后端，build_ozon_product_item 在 price 基础上 +price_offset
             price_offset: priceOffset,
             edit_mode: this._editMode,

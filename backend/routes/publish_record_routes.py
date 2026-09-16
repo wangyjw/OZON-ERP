@@ -180,9 +180,19 @@ def submit_publish_record(record_id):
     if not product_id:
         return error_response("该记录未关联商品，无法提交发布")
 
-    # 调用发布服务
+    # create_task 强制要求 storeId；记录未绑店铺时返回可操作提示而非通用报错
+    store_id = record.get('storeId')
+    if not store_id:
+        return error_response("该记录未指定店铺，请编辑记录选择店铺后再提交")
+
+    # 调用发布服务（透传店铺与发布模式）
     try:
-        task = PublishService.create_task(product_id, record.get('platform', 'ozon'))
+        task = PublishService.create_task(
+            product_id,
+            record.get('platform', 'ozon'),
+            store_id=store_id,
+            publish_mode=record.get('publishMode'),
+        )
 
         # 更新上架记录状态
         PublishRecord.update(record_id, {
@@ -212,11 +222,12 @@ def refresh_publish_record(record_id):
     if not ozon_task_id:
         return success_response(data=record, msg="无 Ozon 任务 ID，无法刷新")
 
-    # 构造任务对象用于查询
+    # 构造任务对象用于查询（带 storeId，供状态回写与店铺别名同步）
     task_obj = {
         'id': record_id,
         'productId': record.get('productId'),
         'ozonTaskId': ozon_task_id,
+        'storeId': record.get('storeId'),
     }
 
     try:
@@ -275,8 +286,19 @@ def batch_submit_publish_records():
         if not record or not record.get('productId'):
             continue
 
+        # 记录未绑店铺时跳过并给出明确提示（create_task 强制要求 storeId）
+        if not record.get('storeId'):
+            PublishRecord.update(rid, {"status": "failed", "error": "该记录未指定店铺，请编辑记录选择店铺后再提交"})
+            results.append({"id": rid, "status": "failed", "error": "未指定店铺"})
+            continue
+
         try:
-            task = PublishService.create_task(record['productId'], record.get('platform', 'ozon'))
+            task = PublishService.create_task(
+                record['productId'],
+                record.get('platform', 'ozon'),
+                store_id=record.get('storeId'),
+                publish_mode=record.get('publishMode'),
+            )
             PublishRecord.update(rid, {
                 "status": task.get('status', 'processing'),
                 "ozonTaskId": task.get('ozonTaskId'),

@@ -8,6 +8,33 @@ let publishSelectedIds = new Set();
 let publishCurrentPage = 1;
 let publishPageSize = 20;
 let publishTotal = 0;
+// 当前页记录缓存：id → record，供提交前校验是否已绑定店铺
+let publishRecordMap = new Map();
+// 店铺映射：store_id → 店铺（含 alias），用于编辑记录时选择发布店铺、回填店铺名
+let publishStoreMap = null;
+
+/** 加载店铺列表（store_id → store），失败时返回空 Map 不阻塞列表渲染 */
+async function loadPublishStoreMap() {
+  if (publishStoreMap) return publishStoreMap;
+  publishStoreMap = new Map();
+  try {
+    const res = await Api.getStores({ pageSize: 500 });
+    const list = res.code === 200 ? (res.data?.list || res.data || []) : [];
+    (Array.isArray(list) ? list : []).forEach(s => {
+      if (s.store_id) publishStoreMap.set(s.store_id, s);
+    });
+  } catch (e) {
+    console.error('[PublishRecords] 店铺列表加载失败:', e);
+  }
+  return publishStoreMap;
+}
+
+/** 取店铺别名（发布记录展示用，优先别名，回退记录内 storeName） */
+function publishStoreAlias(storeId, fallback) {
+  if (!storeId || !publishStoreMap) return fallback || '';
+  const s = publishStoreMap.get(storeId);
+  return (s && s.alias) || fallback || '';
+}
 
 function renderPublishPage(route) {
   return `
@@ -134,6 +161,7 @@ async function loadPublishData() {
   const footerEl = document.getElementById('publishFooterBar');
 
   try {
+    await loadPublishStoreMap();
     const keyword = document.getElementById('publishSearchInput')?.value?.trim() || '';
     const res = await Api.getPublishRecords({
       page: publishCurrentPage,
@@ -154,6 +182,9 @@ async function loadPublishData() {
     // 更新统计
     loadPublishStats();
 
+    // 缓存当前页记录，供提交前校验店铺绑定
+    publishRecordMap = new Map(records.map(r => [r.id, r]));
+
     if (records.length === 0) {
       tbody.innerHTML = '';
       if (emptyEl) emptyEl.style.display = 'flex';
@@ -168,7 +199,12 @@ async function loadPublishData() {
     const totalPages = Math.ceil(publishTotal / publishPageSize) || 1;
     document.getElementById('publishPageInfo').textContent = `${publishCurrentPage}/${totalPages}`;
 
-    tbody.innerHTML = records.map(record => `
+    tbody.innerHTML = records.map(record => {
+      // 记录未绑定店铺时无法创建发布任务（后端 create_task 强制要求 storeId），按钮禁用并给出指引
+      const noStore = !record.storeId;
+      const canSubmit = (record.status === 'pending' || record.status === 'failed') && !noStore;
+      const storeLabel = publishStoreAlias(record.storeId, record.storeName);
+      return `
       <tr data-id="${record.id}">
         <td><input type="checkbox" class="table-check-item publish-check" value="${record.id}" onclick="togglePublishSelect('${record.id}', this.checked)"></td>
         <td>
@@ -192,11 +228,15 @@ async function loadPublishData() {
             <div style="font-size:11px;color:var(--text-tertiary);margin-top:1px;">${formatPubTime(record.createdAt)}</div>
           </div>
         </td>
-        <td><span class="store-badge">${record.storeName || '-'}</span></td>
+        <td>${storeLabel
+          ? `<span class="store-badge">${storeLabel}</span>`
+          : `<span class="store-badge" style="color:var(--danger-color,#e5484d);cursor:pointer;" title="未指定店铺，点击编辑选择发布店铺" onclick="editPublishRecord('${record.id}')">未指定店铺</span>`}</td>
         <td>
           <div class="action-btns">
-            ${record.status === 'pending' || record.status === 'failed'
-              ? `<button class="action-link" onclick="submitSinglePublishRecord('${record.id}')">发布</button>`
+            ${(record.status === 'pending' || record.status === 'failed')
+              ? (canSubmit
+                  ? `<button class="action-link" onclick="submitSinglePublishRecord('${record.id}')">发布</button>`
+                  : `<button class="action-link" disabled title="请先编辑记录选择发布店铺" style="opacity:0.45;cursor:not-allowed;">发布</button>`)
               : ''}
             ${record.status === 'processing'
               ? `<button class="action-link" onclick="refreshSinglePublishRecord('${record.id}')">刷新</button>`
@@ -206,7 +246,8 @@ async function loadPublishData() {
           </div>
         </td>
       </tr>
-    `).join('');
+    `;
+    }).join('');
 
     updatePublishSelection();
     if (window.lucide) lucide.createIcons();
@@ -280,6 +321,20 @@ function publishNextPage() {
 // ===== 单项操作 =====
 
 async function submitSinglePublishRecord(id) {
+  // 未绑定店铺的记录提交必定失败（后端 create_task 强制要求 storeId），提前拦截并引导编辑
+  const record = publishRecordMap.get(id);
+  if (record && !record.storeId) {
+    Toast.show('该记录未指定店铺，请先编辑记录选择发布店铺', 'warning');
+    editPublishRecord(id);
+    return;
+  }
+  // 店铺未授权/凭证失效时发布同样会失败，提前提示避免无效任务
+  const store = record && record.storeId ? publishStoreMap?.get(record.storeId) : null;
+  const authStatus = store && (store.authStatus || store.auth_status);
+  if (authStatus && authStatus !== 'active') {
+    Toast.show(`店铺「${store.alias || record.storeId}」未授权或凭证已失效，请先到店铺管理重新授权`, 'warning');
+    return;
+  }
   Toast.show('正在提交发布...', 'info');
   const res = await Api.submitPublishRecord(id);
   if (res.code === 200) {
@@ -309,6 +364,19 @@ async function editPublishRecord(id) {
   }
   const record = res.data;
 
+  // 店铺下拉：发布必须指定店铺（后端 create_task 强制要求 storeId），故此处只能选不能填
+  await loadPublishStoreMap();
+  const storeOptions = [...publishStoreMap.values()];
+  const storeOptionHtml = storeOptions.map(s => {
+    // 非 active（未授权/已失效）店铺发布必失败，标注原因并置灰不可选
+    const status = s.authStatus || s.auth_status || '';
+    const notReady = status !== '' && status !== 'active';
+    const statusLabel = { pending: '待授权', expired: '凭证已失效', disabled: '已停用' }[status] || status;
+    return `<option value="${s.store_id}" ${s.store_id === record.storeId ? 'selected' : ''} ${notReady ? 'disabled' : ''}>
+      ${s.alias || s.store_id}${notReady ? '（' + statusLabel + '）' : ''}
+    </option>`;
+  }).join('');
+
   Modal.show({
     title: '编辑上架记录',
     size: 'lg',
@@ -331,8 +399,13 @@ async function editPublishRecord(id) {
                 </select></div>
             </div>
             <div class="form-row-2">
-              <div class="form-group"><label class="form-label">店铺名称</label>
-                <input type="text" class="form-input" id="epRecStore" value="${record.storeName || ''}"></div>
+              <div class="form-group"><label class="form-label">发布店铺 <span style="color:var(--danger-color,#e5484d);">*</span></label>
+                <select class="form-select" id="epRecStoreId" ${storeOptions.length ? '' : 'disabled'}>
+                  <option value="">${storeOptions.length ? '请选择发布店铺' : '暂无可用店铺，请先在店铺管理中添加'}</option>
+                  ${storeOptionHtml}
+                </select>
+                <div style="font-size:11px;color:var(--text-tertiary);margin-top:4px;">发布必须指定店铺，未选择时无法提交发布</div>
+              </div>
               <div class="form-group"><label class="form-label">发布人员</label>
                 <input type="text" class="form-input" id="epRecPublisher" value="${record.publisher || ''}"></div>
             </div>
@@ -350,11 +423,20 @@ async function editPublishRecord(id) {
     footer: [
       { text: '取消', class: 'btn-ghost' },
       { text: '保存修改', class: 'btn-primary', onClick: async () => {
+        const storeIdEl = document.getElementById('epRecStoreId');
+        const storeId = storeIdEl ? storeIdEl.value : (record.storeId || '');
+        // 发布记录必须绑定店铺，否则提交发布必定失败，这里直接拦住
+        if (!storeId) {
+          Toast.show('请选择发布店铺', 'warning');
+          return;
+        }
+        const selectedStore = publishStoreMap.get(storeId);
         const updateData = {
           title: document.getElementById('epRecTitle').value,
           price: parseFloat(document.getElementById('epRecPrice').value) || 0,
           status: document.getElementById('epRecStatus').value,
-          storeName: document.getElementById('epRecStore').value,
+          storeId: storeId,
+          storeName: (selectedStore && selectedStore.alias) || record.storeName || '',
           publisher: document.getElementById('epRecPublisher').value,
           sourceName: document.getElementById('epRecSourceName').value,
           sourceUrl: document.getElementById('epRecSourceUrl').value,
@@ -394,13 +476,43 @@ async function batchSubmitPublishRecords() {
     Toast.show('请先选择要发布的记录', 'warning');
     return;
   }
+
+  // 批量提交必须逐条带 storeId，否则会被后端标记失败；先筛出未绑定店铺/店铺未授权的记录
+  await loadPublishStoreMap();
+  const missing = [];
+  const notReady = [];
+  for (const id of publishSelectedIds) {
+    const record = publishRecordMap.get(id);
+    if (!record || !record.storeId) {
+      missing.push(id);
+      continue;
+    }
+    const store = publishStoreMap.get(record.storeId);
+    const status = store && (store.authStatus || store.auth_status);
+    if (status && status !== 'active') notReady.push(id);
+  }
+  if (missing.length) {
+    Toast.show(`有 ${missing.length} 条记录未指定店铺，请先编辑选择发布店铺`, 'warning');
+    return;
+  }
+  if (notReady.length) {
+    Toast.show(`有 ${notReady.length} 条记录的目标店铺未授权或凭证已失效，请先到店铺管理重新授权`, 'warning');
+    return;
+  }
+
   const confirmed = await Modal.confirm(`确定将选中的 ${publishSelectedIds.size} 条记录提交发布？`);
   if (!confirmed) return;
 
   Toast.show(`正在提交 ${publishSelectedIds.size} 条发布任务...`, 'info');
   const res = await Api.batchSubmitPublishRecords([...publishSelectedIds]);
   if (res.code === 200) {
-    Toast.show(`已提交 ${res.data?.count || publishSelectedIds.size} 条发布任务`, 'success');
+    const results = res.data?.results || [];
+    const failed = results.filter(r => r.status === 'failed').length;
+    if (failed) {
+      Toast.show(`已提交 ${results.length - failed} 条，${failed} 条失败`, 'warning');
+    } else {
+      Toast.show(`已提交 ${res.data?.count || publishSelectedIds.size} 条发布任务`, 'success');
+    }
     publishSelectedIds.clear();
     loadPublishData();
   } else {

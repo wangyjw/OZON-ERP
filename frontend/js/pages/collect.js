@@ -4686,8 +4686,9 @@ function showStoreSelectModal() {
       }
     }
 
-    // 仅展示已授权（active）的店铺
+    // 仅 active 店铺可选；失效店铺灰显说明原因（M1）
     const activeStores = stores.filter(s => s.authStatus === 'active');
+    const disabledStores = stores.filter(s => s.authStatus !== 'active' && s.authStatus !== 'disabled');
 
     if (activeStores.length === 0) {
       Toast.show('没有已授权的店铺，请先在店铺管理中添加并授权店铺', 'error', 4000);
@@ -4716,12 +4717,34 @@ function showStoreSelectModal() {
         </label>`;
     }).join('');
 
+    // 失效店铺灰显区块：告知用户为何看不到这些店铺（不可选）
+    const disabledHtml = disabledStores.length ? `
+      <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--border-color);">
+        <p style="font-size:12px;color:var(--text-tertiary);margin-bottom:8px;">以下店铺凭证失效，无法发布，请到「店铺管理」重新授权：</p>
+        ${disabledStores.map(s => {
+          const sid = s.store_id || s.storeId || s.id;
+          const reason = s.authStatus === 'expired'
+            ? (s.lastAuthError || '凭证失效')
+            : '待授权';
+          return `
+            <div class="store-publish-option disabled" title="${escapeAttr(reason)}"
+                 style="display:flex;align-items:center;gap:10px;padding:10px 14px;border:1px solid var(--border-color);border-radius:8px;opacity:.55;cursor:not-allowed;background:var(--bg-secondary,#f9fafb);">
+              <input type="radio" disabled style="width:16px;height:16px;flex-shrink:0;">
+              <div style="flex:1;min-width:0;">
+                <div style="font-weight:500;color:var(--text-tertiary);font-size:13px;">${escapeHtml(s.alias || sid)}</div>
+                <div style="font-size:12px;color:var(--text-tertiary);margin-top:2px;">${escapeHtml(sid)}</div>
+              </div>
+              <span class="store-status-badge status-expired" style="flex-shrink:0;">凭证失效</span>
+            </div>`;
+        }).join('')}
+      </div>` : '';
+
     Modal.show({
       title: '选择发布店铺',
       size: 'sm',
       body: `
         <p style="font-size:13px;color:var(--text-secondary);margin-bottom:14px;">请选择要发布到的 Ozon 店铺：</p>
-        <div style="display:flex;flex-direction:column;gap:8px;">${storeListHtml}</div>
+        <div style="display:flex;flex-direction:column;gap:8px;">${storeListHtml}${disabledHtml}</div>
       `,
       footer: [
         { text: '取消', class: 'btn-ghost', onClick: () => { Modal.close(); resolve(null); } },
@@ -4902,6 +4925,38 @@ function resolvePublishMode(product, options = {}) {
 }
 
 /** 发布商品。返回 true 表示提交成功（含异步处理中），false 表示提交失败 */
+/** M2 preflight 阻塞弹窗：列出所有 blockers，提供「去编辑」跳转 */
+function showPreflightBlockerModal(product, blockers, warnings) {
+  const blockerHtml = (blockers || []).map(b =>
+    `<li style="padding:6px 0;color:var(--text-danger,#dc2626);font-size:13px;">• ${escapeHtml(b)}</li>`
+  ).join('');
+  const warnHtml = (warnings || []).map(w =>
+    `<li style="padding:4px 0;color:var(--text-warning,#d97706);font-size:12px;">• ${escapeHtml(w)}</li>`
+  ).join('');
+  Modal.show({
+    title: '发布前检查未通过',
+    size: 'sm',
+    body: `
+      <p style="font-size:13px;color:var(--text-secondary);margin-bottom:10px;">
+        商品「${escapeHtml(product.title || product.id)}」存在以下阻塞项，请先处理后重试：
+      </p>
+      <ul style="list-style:none;padding:0;margin:0 0 ${warnings && warnings.length ? '12px' : '0'};max-height:220px;overflow-y:auto;">
+        ${blockerHtml}
+      </ul>
+      ${warnings && warnings.length ? `
+        <p style="font-size:12px;color:var(--text-tertiary);margin-bottom:6px;">以下警告不阻塞发布：</p>
+        <ul style="list-style:none;padding:0;margin:0;max-height:120px;overflow-y:auto;">${warnHtml}</ul>` : ''}
+    `,
+    footer: [
+      { text: '取消', class: 'btn-ghost', onClick: () => Modal.close() },
+      { text: '去编辑', class: 'btn-primary', onClick: () => {
+        Modal.close();
+        editProduct(product.id);
+      } },
+    ],
+  });
+}
+
 async function publishProduct(id, fromSaveAndPublish = false, storeId = null, options = {}) {
   const product = allProducts.find(p => p.id === id);
   if (!product) return false;
@@ -4935,9 +4990,44 @@ async function publishProduct(id, fromSaveAndPublish = false, storeId = null, op
       storeId = await showStoreSelectModal();
       if (!storeId) return false;
     }
+    const publishMode = options.publishMode || resolvePublishMode(product);
+
+    // M2: 发布前置只读预检 — 在真正建任务前暴露可预防的失败
+    try {
+      const pfRes = await Api.publishPreflight({
+        productIds: [id],
+        storeId: storeId,
+        publishMode: publishMode,
+      });
+      if (pfRes.code === 200 && pfRes.data) {
+        const pf = pfRes.data;
+        const item = (pf.items || []).find(i => i.productId === id) || {};
+        const storeBlocked = pf.storeReady === false;
+        const itemBlocked = item.ready === false;
+        const allBlockers = [
+          ...(storeBlocked && pf.storeError ? [pf.storeError] : []),
+          ...((item.blockers) || []),
+        ];
+        if (storeBlocked || itemBlocked) {
+          product.publishStatus = 'failed';
+          product.publishError = allBlockers[0] || '发布预检未通过';
+          renderTable();
+          showPreflightBlockerModal(product, allBlockers, item.warnings || []);
+          return false;
+        }
+        // 仅 warnings：黄色提示但允许继续
+        const warnings = item.warnings || [];
+        if (warnings.length) {
+          Toast.show('预检警告：' + warnings[0], 'warning', 4000);
+        }
+      }
+      // preflight 接口失败（404/500/网络错误）→ 不阻塞，走原有发布路径
+    } catch (pfErr) {
+      console.warn('[M2 preflight] 预检接口异常，跳过预检直接发布:', pfErr);
+    }
+
     const payload = { productIds: [id], platform: 'ozon' };
     payload.storeId = storeId;
-    const publishMode = options.publishMode || resolvePublishMode(product);
     if (publishMode) payload.publishMode = publishMode;
     const res = await Api.submitPublish(payload);
 

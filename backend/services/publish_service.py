@@ -2670,20 +2670,71 @@ def _publish_product_async(task_id, product_id, platform, store_id=None, publish
         "publishStatus": "failed",
         "publishError": final_error,
     })
+    # M1 绑店闭环：Ozon 返回 401/403 说明凭证失效，反向标记店铺为 expired 并记录错误
+    if isinstance(last_error, OzonAPIError) and last_error.status_code in (401, 403):
+        _mark_store_credential_expired(store_id, last_error)
     _sync_publish_record(product, PublishTask.find_by_id(task_id), store_name='')
     print(f'[发布] 商品 {product_id} 发布最终失败: {last_error}')
+
+
+def _mark_store_credential_expired(store_id, error):
+    """发布遇 401/403 时，将店铺标记为凭证失效并写入 last_auth_error（M1）
+
+    复用 expired 状态（CHECK 约束枚举内），不新增枚举值。
+    """
+    if not store_id:
+        return
+    try:
+        from models.account import Store
+        store = Store.find_by_store_id(store_id)
+        if not store:
+            return
+        from datetime import datetime
+        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        Store.update(
+            store['id'],
+            auth_status='expired',
+            verify_time=now,
+            last_auth_error=f'发布时凭证失效（HTTP {getattr(error, "status_code", "?")}）：{getattr(error, "message", str(error))}',
+        )
+        print(f'[发布] 店铺 {store_id} 凭证已标记为 expired')
+    except Exception as e:
+        print(f'[发布] 标记店铺 {store_id} 凭证失效失败: {e}')
+
+
+def _resolve_store_alias(store_id):
+    """按 store_id 取店铺别名（stores 表实际字段为 alias）
+
+    找不到店铺或未传 store_id 时返回空串。
+    """
+    if not store_id:
+        return ''
+    try:
+        from models.account import Store
+        store = Store.find_by_store_id(store_id)
+    except Exception:
+        return ''
+    if not store:
+        return ''
+    return store.get('alias', '') or store.get('store_name', '') or store.get('name', '') or ''
 
 
 def _sync_publish_record(product, task, store_name=''):
     """创建或更新上架记录（PublishRecord），与 PublishTask 状态同步
 
     每次发布时创建一条上架记录，后续状态变更时通过 productId 查找并更新。
+    store_name 未显式传入（调用方通常传 ''）时，按 task.storeId 回查店铺别名补齐，
+    避免上架记录「店铺」列恒为空。
     """
     if not product:
         return None
     product_id = product.get('id')
     if not product_id:
         return None
+
+    store_id = task.get('storeId') if task else None
+    if not store_name:
+        store_name = _resolve_store_alias(store_id)
 
     # 查找是否已有该商品的上架记录（同商品复用，不重复创建）
     existing = None
@@ -2700,7 +2751,7 @@ def _sync_publish_record(product, task, store_name=''):
         'images': product.get('images', []),
         'status': task.get('status', 'pending') if task else 'pending',
         'platform': 'ozon',
-        'storeId': task.get('storeId') if task else None,
+        'storeId': store_id,
         'storeName': store_name,
         'sourceUrl': product.get('originalUrl', '') or (product.get('sourceLinks', [{}])[0].get('url', '') if product.get('sourceLinks') else ''),
         'sourceName': product.get('sourceName', ''),
@@ -2766,19 +2817,18 @@ class PublishService:
             "status": "pending",
         })
 
+        # 创建/更新上架记录（storeName 由 _sync_publish_record 按 task.storeId 回查店铺别名补齐）
+        store_name = _resolve_store_alias(store_id)
+
         # 更新商品发布状态
+        # storeId/store 在任务创建时即预写，避免长时间发布过程中采集箱「发布店铺」列显示为空
         Product.update(product_id, {
             "publishStatus": "processing",
             "publishTaskId": task['id'],
+            "storeId": store_id,
+            "store": store_name,
         })
 
-        # 创建/更新上架记录
-        store_name = ''
-        if store_id:
-            from models.account import Store
-            store = Store.find_by_store_id(store_id)
-            if store:
-                store_name = store.get('store_name', '') or store.get('name', '')
         _sync_publish_record(product, task, store_name=store_name)
 
         # 提交到后台线程池异步执行完整发布流程
@@ -2897,6 +2947,9 @@ class PublishService:
                         'publishStatus': local_status,
                         'ozonProductId': product_ids[0],
                         'ozonProductIds': product_ids,
+                        # 回写店铺字段：采集箱「发布店铺」列的数据来源（多店铺重复发布保留最后一次成功）
+                        'storeId': store_id,
+                        'store': _resolve_store_alias(store_id),
                     })
 
                 # 收集错误详情

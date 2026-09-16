@@ -4,8 +4,8 @@
  */
 const Api = (() => {
   // 后端 API 基础地址（开发环境）
-  //const BASE_URL = 'http://localhost:5000';
-  const BASE_URL = 'https://ozon.wangyaojun.cn';
+  const BASE_URL = 'http://localhost:5000';
+  //const BASE_URL = 'https://ozon.wangyaojun.cn';
 
   // 请求超时时间（毫秒）
   const TIMEOUT = 15000;
@@ -145,6 +145,15 @@ const Api = (() => {
     return request('/api/publish', {
       method: 'POST',
       body: JSON.stringify(taskData),
+    });
+  }
+
+  /** 发布前置只读预检（M2）：提交前暴露可预防的失败 */
+  function publishPreflight(payload) {
+    return request('/api/publish/preflight', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeout: 30000,
     });
   }
 
@@ -378,9 +387,18 @@ const Api = (() => {
     });
   }
 
-  /** 更新店铺授权 */
+  /** 更新店铺授权（M1：后端已改为真实校验 Ozon 凭证） */
   function refreshStoreAuth(id) {
-    return request(`/api/stores/${id}/refresh-auth`, { method: 'POST' });
+    return request(`/api/stores/${id}/refresh-auth`, { method: 'POST', timeout: 30000 });
+  }
+
+  /** 校验店铺凭证（M1）：{ storePk } 校验已存店铺；{ clientId, apiKey } 添加前预检 */
+  function verifyStore(payload) {
+    return request('/api/stores/verify', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      timeout: 30000,
+    });
   }
 
   /** 获取分组列表 */
@@ -766,6 +784,7 @@ const Api = (() => {
     batchDeleteProducts,
     batchUpdateProducts,
     submitPublish,
+    publishPreflight,
     getPublishStatus,
     retryPublishTask,
     getPublishRecords,
@@ -798,6 +817,7 @@ const Api = (() => {
     batchSetCurrency,
     batchDeleteStores,
     refreshStoreAuth,
+    verifyStore,
     getStoreGroups,
     getCategories,
     matchCategory,

@@ -157,6 +157,11 @@
       return this.post('/api/publish', data, { timeout: 20000 });
     },
 
+    /** M2: 发布前置只读预检（不建任务、不写 Ozon） */
+    publishPreflight: function (data) {
+      return this.post('/api/publish/preflight', data, { timeout: 30000 });
+    },
+
     fetchPublishStatus: function (taskId) {
       return this.get('/api/publish/' + encodeURIComponent(taskId) + '/status');
     },
