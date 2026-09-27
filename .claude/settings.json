@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__web-reader__webReader",
+      "mcp__web-search-prime__web_search_prime",
+      "Bash(python -m py_compile services/ozon_api.py routes/store_routes.py)",
+      "Bash(node --check ../extension/core/config.js)",
+      "Bash(node --check ../extension/entrypoints/options.js)",
+      "Bash(node --check ../frontend/js/api.js)",
+      "Bash(python -m py_compile services/publish_preflight_service.py routes/publish_routes.py)",
+      "Bash(python -m unittest tests.test_publish_preflight -v)",
+      "Bash(node --check ../frontend/js/pages/collect.js)",
+      "Bash(node --check ../extension/features/publish/publish-modal.js)",
+      "Bash(node --check ../extension/core/api-client.js)",
+      "Bash(python -c ' *)",
+      "Bash(netstat -ano)",
+      "Bash(wmic process *)",
+      "Bash(tasklist //FI \"PID eq 12384\")",
+      "WebSearch",
+      "Bash(python -X utf8 -c ' *)",
+      "Bash(python -X utf8 -c \"import secrets; print\\(secrets.token_hex\\(32\\)\\)\")",
+      "mcp__zread__search_doc"
+    ]
+  }
+}
