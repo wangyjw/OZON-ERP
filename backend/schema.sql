@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS stores (
     api_key         TEXT,                                -- Ozon API Key (加密存储)
     auth_status     TEXT    NOT NULL DEFAULT 'pending' CHECK(auth_status IN ('active', 'expired', 'pending', 'disabled')),
     auth_time       TEXT,                                -- 授权时间
+    verify_time     TEXT,                                -- 最后一次真实校验时间（M1）
+    last_auth_error TEXT,                                -- 最后一次校验/发布失败的凭证错误（M1）
     today_limit     INTEGER NOT NULL DEFAULT 0,         -- 今日可刊登数
     account_id      INTEGER,                           -- 所属账户 ID（可为空，表示公共店铺）
     created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
